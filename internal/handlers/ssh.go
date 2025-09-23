@@ -11,17 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var (
-	nodesMap = make(map[string]models.SSHTestRequestWithID)
-	nodesMu  sync.Mutex
-)
-
-func SaveNode(node models.SSHTestRequestWithID) {
-	nodesMu.Lock()
-	nodesMap[strconv.Itoa(node.ID)] = node
-	nodesMu.Unlock()
-}
-
 func SSHTestHandler(c *gin.Context) {
 	var req models.SSHTestRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -57,7 +46,7 @@ func SSHTestHandler(c *gin.Context) {
 	} else {
 		resp.Message = "SSH connection successful"
 		resp.Details = details
-		SaveNode(nodeWithID) // 保存节点信息
+		SaveNode(nodeWithID) // 使用 common.go 的 SaveNode
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -93,7 +82,7 @@ func SSHBatchTestHandler(c *gin.Context) {
 				results[idx].Message = err.Error()
 			} else {
 				results[idx].Message = "SSH connection successful"
-				SaveNode(node) // 保存节点信息
+				SaveNode(node) // 使用 common.go 的 SaveNode
 			}
 		}(i, node)
 	}
