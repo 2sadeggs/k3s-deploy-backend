@@ -42,7 +42,7 @@ func (m *Manager) ApplyNodeLabels(client *ssh.Client, labels map[string][]string
 	for nodeName, nodeLabels := range labels {
 		for _, label := range nodeLabels {
 			cmd := fmt.Sprintf("kubectl label nodes %s %s --overwrite", nodeName, label)
-			_, err := client.ExecuteCommand(cmd)
+			result, err := client.ExecuteCommand(cmd)
 			if err != nil {
 				m.logger.Errorf("应用标签失败 %s: %v", label, err)
 				return fmt.Errorf("为节点 %s 应用标签 %s 失败: %v", nodeName, label, err)

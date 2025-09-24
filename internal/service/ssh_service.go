@@ -2,11 +2,10 @@ package service
 
 import (
 	"fmt"
-	"sync"
-
 	"k3s-deploy-backend/internal/model"
 	"k3s-deploy-backend/internal/pkg/logger"
 	"k3s-deploy-backend/internal/pkg/ssh"
+	"sync"
 )
 
 type SSHService struct {
