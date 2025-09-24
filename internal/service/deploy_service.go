@@ -94,12 +94,14 @@ func (s *DeployService) configureAgentStep(req *model.DeployRequest) error {
 		return fmt.Errorf("未找到Master节点")
 	}
 
-	// 配置所有Agent节点
+	// 配置所有Agent节点，使用索引生成节点名称
+	agentIndex := 0
 	for _, node := range req.Nodes {
 		if node.Name != "k3s-master" {
-			if err := s.k3sService.ConfigureAgent(masterNode, node); err != nil {
+			if err := s.k3sService.ConfigureAgent(masterNode, node, agentIndex); err != nil {
 				return fmt.Errorf("配置Agent节点 %s 失败: %v", node.Name, err)
 			}
+			agentIndex++
 		}
 	}
 

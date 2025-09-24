@@ -51,7 +51,7 @@ func main() {
 	})
 
 	appLogger.Info("Server starting on :8080")
-	if err := r.Run(":8080"); err != nil {
+	if err := r.Run("127.0.0.1:8080"); err != nil {
 		log.Fatal("Failed to start server:", err)
 	}
 }

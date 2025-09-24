@@ -42,7 +42,6 @@ func (s *K3sService) ValidateNodes(nodes []model.NodeConfig) error {
 			return fmt.Errorf("节点 %s (%s) 连接失败: %v", node.Name, node.IP, err)
 		}
 
-		// 检查系统要求
 		if err := s.checkSystemRequirements(client, node.Name); err != nil {
 			client.Close()
 			return fmt.Errorf("节点 %s 系统检查失败: %v", node.Name, err)
@@ -56,7 +55,6 @@ func (s *K3sService) ValidateNodes(nodes []model.NodeConfig) error {
 }
 
 func (s *K3sService) checkSystemRequirements(client *ssh.Client, nodeName string) error {
-	// 检查操作系统
 	result, err := client.ExecuteCommand("cat /etc/os-release")
 	if err != nil {
 		return fmt.Errorf("无法获取系统信息: %v", err)
@@ -66,7 +64,6 @@ func (s *K3sService) checkSystemRequirements(client *ssh.Client, nodeName string
 		s.logger.Warnf("节点 %s 操作系统可能不受支持", nodeName)
 	}
 
-	// 检查内存
 	result, err = client.ExecuteCommand("free -m | awk 'NR==2{printf \"%.0f\", $2}'")
 	if err == nil && result.Stdout != "" {
 		s.logger.Infof("节点 %s 内存: %s MB", nodeName, result.Stdout)
@@ -96,7 +93,7 @@ func (s *K3sService) InstallMaster(node model.NodeConfig) error {
 	return s.installer.InstallMaster(client, node.Name)
 }
 
-func (s *K3sService) ConfigureAgent(masterNode, agentNode model.NodeConfig) error {
+func (s *K3sService) ConfigureAgent(masterNode, agentNode model.NodeConfig, agentIndex int) error {
 	s.logger.DeploymentStep("configure-agent", agentNode.Name)
 
 	// 获取Master节点token
@@ -115,8 +112,8 @@ func (s *K3sService) ConfigureAgent(masterNode, agentNode model.NodeConfig) erro
 	}
 
 	token, err := s.manager.GetNodeToken(masterClient)
-	masterClient.Close()
 	if err != nil {
+		masterClient.Close()
 		return fmt.Errorf("获取节点token失败: %v", err)
 	}
 
@@ -132,11 +129,24 @@ func (s *K3sService) ConfigureAgent(masterNode, agentNode model.NodeConfig) erro
 	})
 
 	if err := agentClient.Connect(); err != nil {
+		masterClient.Close()
 		return fmt.Errorf("连接Agent节点失败: %v", err)
 	}
 	defer agentClient.Close()
 
-	return s.installer.InstallAgent(agentClient, agentNode.Name, masterNode.IP, token)
+	// 动态生成Agent节点名称
+	agentNodeName := "k3s-agent"
+	if agentIndex > 0 {
+		agentNodeName = fmt.Sprintf("k3s-agent-%d", agentIndex+1)
+	}
+
+	err = s.installer.InstallAgent(agentClient, masterClient, agentNodeName, token)
+	masterClient.Close()
+	if err != nil {
+		return fmt.Errorf("配置Agent节点 %s 失败: %v", agentNodeName, err)
+	}
+
+	return nil
 }
 
 func (s *K3sService) ApplyLabels(masterNode model.NodeConfig, labels map[string][]string) error {

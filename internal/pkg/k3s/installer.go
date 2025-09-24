@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -48,9 +49,9 @@ func (i *Installer) InstallMaster(client *ssh.Client, nodeName string) error {
 		return nil
 	}
 
-	// 使用高级安装逻辑
+	// 设置环境变量，仅包含节点名称
 	envArgs := []string{
-		"INSTALL_K3S_EXEC=--disable traefik --write-kubeconfig-mode 644",
+		"K3S_NODE_NAME=k3s-master",
 	}
 	cmdArgs := []string{}
 
@@ -67,7 +68,7 @@ func (i *Installer) InstallMaster(client *ssh.Client, nodeName string) error {
 	return nil
 }
 
-func (i *Installer) InstallAgent(client *ssh.Client, nodeName, masterIP, token string) error {
+func (i *Installer) InstallAgent(client *ssh.Client, masterClient *ssh.Client, nodeName string, token string) error {
 	i.logger.Infof("开始在节点 %s 上安装K3s Agent", nodeName)
 
 	// 检查是否已经安装K3s
@@ -76,10 +77,18 @@ func (i *Installer) InstallAgent(client *ssh.Client, nodeName, masterIP, token s
 		return nil
 	}
 
-	// Agent环境变量
+	// 获取Master内部IP
+	masterIP, err := i.getInternalIP(masterClient)
+	if err != nil {
+		return fmt.Errorf("获取Master内部IP失败: %v", err)
+	}
+	i.logger.Infof("从Master节点自动获取的内部IP: %s", masterIP)
+
+	// 设置环境变量，包含节点名称
 	envArgs := []string{
 		fmt.Sprintf("K3S_URL=https://%s:6443", masterIP),
 		fmt.Sprintf("K3S_TOKEN=%s", token),
+		fmt.Sprintf("K3S_NODE_NAME=%s", nodeName),
 	}
 	cmdArgs := []string{}
 
@@ -91,22 +100,41 @@ func (i *Installer) InstallAgent(client *ssh.Client, nodeName, masterIP, token s
 	return nil
 }
 
-// 自定义k3s安装 -- 根据国内环境国外环境判断使用国内源或官方国外源
+func (i *Installer) getInternalIP(client *ssh.Client) (string, error) {
+	cmd := `bash -c "echo '' | nc -u -w 2 8.8.8.8 80 && ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | head -n 1"`
+	result, err := client.ExecuteCommand(cmd)
+	if err != nil {
+		// 备选命令，防止 nc 不可用
+		cmd = `ip route get 8.8.8.8 | grep -oP 'src \K\d+(\.\d+){3}' | head -n 1`
+		result, err = client.ExecuteCommand(cmd)
+		if err != nil {
+			return "", fmt.Errorf("执行IP获取命令失败: %v", err)
+		}
+	}
+
+	ip := strings.TrimSpace(result.Stdout)
+	if ip == "" {
+		return "", fmt.Errorf("无法获取节点的内部IP")
+	}
+
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("获取的IP地址格式无效: %s", ip)
+	}
+
+	return ip, nil
+}
+
 func (i *Installer) autoInstallK3sByLocation(client *ssh.Client, envArgs, cmdArgs []string) error {
-	// 获取安装脚本URL
 	installURL, err := i.getInstallURL(client)
 	if err != nil {
 		return err
 	}
 
 	i.logger.Infof("使用安装URL: %s", installURL)
-	// 执行安装
 	return i.executeInstall(client, installURL, envArgs, cmdArgs)
 }
 
-// 获取安装脚本URL
 func (i *Installer) getInstallURL(client *ssh.Client) (string, error) {
-	// 判断是否在中国大陆
 	if isChina, err := i.isInMainlandChina(client); err != nil {
 		i.logger.Warnf("无法判断网络环境，默认使用国内源: %v", err)
 		return officialCNInstallURL, nil
@@ -116,36 +144,28 @@ func (i *Installer) getInstallURL(client *ssh.Client) (string, error) {
 	return officialInstallURL, nil
 }
 
-// 判断是否是国内环境
 func (i *Installer) isInMainlandChina(client *ssh.Client) (bool, error) {
-	// 如果无法访问互联网，假定为国内环境
 	if reachable, _ := i.isInternetReachable(client, "http://www.baidu.com"); !reachable {
 		return true, nil
 	}
-
-	// 如果程序能访问到谷歌，结果为true再取反为false表示不是中国大陆
 	if reachable, _ := i.isInternetReachable(client, "http://www.google.com"); !reachable {
 		return true, nil
 	}
-
 	return false, nil
 }
 
-// 检测网络可达性
 func (i *Installer) isInternetReachable(client *ssh.Client, url string) (bool, error) {
 	cmd := fmt.Sprintf("curl -s --connect-timeout 3 --max-time 5 %s > /dev/null 2>&1", url)
 	result, err := client.ExecuteCommand(cmd)
 	return err == nil && result.ExitCode == 0, err
 }
 
-// 执行安装
 func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArgs, cmdArgs []string) error {
 	i.logger.Infof("=== K3s 安装调试信息 ===")
 	i.logger.Infof("安装URL: %s", installURL)
 	i.logger.Infof("环境变量数量: %d", len(envArgs))
 	i.logger.Infof("命令参数数量: %d", len(cmdArgs))
 
-	// Step 0: 检测操作系统类型
 	i.logger.Info("Step 0: 检测操作系统类型")
 	isDomestic, osName, err := i.isDomesticOS(client)
 	if err != nil {
@@ -160,7 +180,6 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		i.logger.Info("将使用默认SELinux处理")
 	}
 
-	// Step 1: 下载脚本
 	i.logger.Info("Step 1: 下载K3s安装脚本")
 	resp, err := http.Get(installURL)
 	if err != nil {
@@ -179,7 +198,6 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 
 	i.logger.Infof("脚本下载成功，大小: %d bytes", len(script))
 
-	// Step 2: 修改脚本
 	i.logger.Info("Step 2: 修改安装脚本")
 	var modifiedScript []byte
 
@@ -211,7 +229,6 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 
 	i.logger.Infof("脚本修改完成，最终大小: %d bytes", len(modifiedScript))
 
-	// Step 3: 保存脚本到远程主机
 	scriptPath := "/tmp/k3s-install-modified.sh"
 	i.logger.Infof("Step 3: 保存修改后的脚本到 %s", scriptPath)
 
@@ -219,20 +236,23 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		return fmt.Errorf("上传安装脚本失败: %v", err)
 	}
 
-	// Step 4: 生成自定义CA证书
-	i.logger.Info("Step 4: 生成自定义CA证书")
+	// 添加执行权限
+	i.logger.Info("Step 4: 设置脚本执行权限")
+	if _, err := client.ExecuteCommand(fmt.Sprintf("chmod +x %s", scriptPath)); err != nil {
+		return fmt.Errorf("设置脚本执行权限失败: %v", err)
+	}
+
+	i.logger.Info("Step 5: 生成自定义CA证书")
 	if err := i.generateCustomCACerts(client); err != nil {
 		i.logger.Warnf("生成自定义CA证书失败: %v", err)
 	}
 
-	// Step 5: 准备环境变量和参数
-	i.logger.Info("Step 5: 准备环境变量和参数")
+	i.logger.Info("Step 6: 准备环境变量和参数")
 	finalEnvArgs := make([]string, len(envArgs))
 	copy(finalEnvArgs, envArgs)
 	finalCmdArgs := make([]string, len(cmdArgs))
 	copy(finalCmdArgs, cmdArgs)
 
-	// 如果是国产操作系统，添加SELinux跳过配置
 	if isDomestic {
 		i.logger.Infof("--- 国产操作系统配置 ---")
 		i.logger.Infof("操作系统名称: %s", osName)
@@ -245,7 +265,6 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		i.logger.Info("已添加SELinux绕过配置")
 	}
 
-	// 如果是国内源自动添加参数
 	if installURL == officialCNInstallURL {
 		i.logger.Info("--- 国内镜像配置 ---")
 
@@ -263,21 +282,19 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		i.logger.Info("已添加国内镜像配置")
 	}
 
-	// Step 6: 执行安装
-	i.logger.Info("Step 6: 开始执行安装")
+	i.logger.Info("Step 7: 开始执行安装")
 
-	// 构建命令
+	// 构建命令，使用 bash -x 调试
 	envStr := strings.Join(finalEnvArgs, " ")
 	var cmd string
 	if len(finalCmdArgs) > 0 {
-		cmd = fmt.Sprintf("cd /tmp && %s bash k3s-install-modified.sh %s", envStr, strings.Join(finalCmdArgs, " "))
+		cmd = fmt.Sprintf("cd /tmp && %s bash -x %s %s", envStr, scriptPath, strings.Join(finalCmdArgs, " "))
 	} else {
-		cmd = fmt.Sprintf("cd /tmp && %s bash k3s-install-modified.sh", envStr)
+		cmd = fmt.Sprintf("cd /tmp && %s bash -x %s", envStr, scriptPath)
 	}
 
 	i.logger.Infof("执行命令: %s", cmd)
 
-	// 设置更长的超时时间
 	result, err := client.ExecuteCommand(cmd)
 	if err != nil {
 		i.logger.Errorf("K3s安装失败: %v", err)
@@ -292,9 +309,7 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 	return nil
 }
 
-// 检测是否为国产操作系统
 func (i *Installer) isDomesticOS(client *ssh.Client) (bool, string, error) {
-	// 读取/etc/os-release文件
 	result, err := client.ExecuteCommand("cat /etc/os-release 2>/dev/null || echo 'not_found'")
 	if err != nil {
 		return i.checkAlternativeOSDetection(client)
@@ -306,7 +321,6 @@ func (i *Installer) isDomesticOS(client *ssh.Client) (bool, string, error) {
 
 	content := strings.ToLower(result.Stdout)
 
-	// 国产操作系统的标识关键词
 	domesticOSKeywords := map[string]string{
 		"kylin":     "银河麒麟",
 		"uos":       "统信UOS",
@@ -329,9 +343,7 @@ func (i *Installer) isDomesticOS(client *ssh.Client) (bool, string, error) {
 	return false, "", nil
 }
 
-// 备用检测方法
 func (i *Installer) checkAlternativeOSDetection(client *ssh.Client) (bool, string, error) {
-	// 检查特有的目录或文件
 	domesticPaths := map[string]string{
 		"/etc/kylin-release":    "银河麒麟",
 		"/etc/uos-release":      "统信UOS",
@@ -346,7 +358,6 @@ func (i *Installer) checkAlternativeOSDetection(client *ssh.Client) (bool, strin
 		}
 	}
 
-	// 检查uname信息
 	result, err := client.ExecuteCommand("uname -a")
 	if err == nil {
 		unameInfo := strings.ToLower(result.Stdout)
@@ -360,37 +371,19 @@ func (i *Installer) checkAlternativeOSDetection(client *ssh.Client) (bool, strin
 	return false, "", nil
 }
 
-// 生成自定义CA证书
 func (i *Installer) generateCustomCACerts(client *ssh.Client) error {
-	// 这里可以实现自定义CA证书生成逻辑
-	// 为了简化，暂时跳过
 	i.logger.Info("自定义CA证书生成已跳过（可在需要时实现）")
 	return nil
 }
 
-// 在setup_env函数的末尾添加setup_registry调用
 func (i *Installer) addRegistrySetup(script []byte) ([]byte, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(script))
 	var modifiedScript bytes.Buffer
-
-	registrySetupFunction := `
-# Setup container registry configuration
-setup_registry() {
-    if [ -n "${INSTALL_K3S_REGISTRIES}" ]; then
-        info "Setting up container registries: ${INSTALL_K3S_REGISTRIES}"
-        # Registry configuration logic would go here
-    fi
-}
-`
-
-	// 首先添加registry setup函数
-	modifiedScript.WriteString(registrySetupFunction)
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		modifiedScript.WriteString(line + "\n")
 
-		// 在setup_env函数的末尾调用setup_registry
 		if strings.HasPrefix(line, "setup_env() {") {
 			for scanner.Scan() {
 				line = scanner.Text()
@@ -405,30 +398,26 @@ setup_registry() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("扫描脚本添加注册表设置时出错: %w", err)
+		return nil, fmt.Errorf("error scanning script for registry setup: %w", err)
 	}
 
 	return modifiedScript.Bytes(), nil
 }
 
-// 在create_env_file函数中添加客户端证书有效期环境变量
 func (i *Installer) addCertificateConfig(script []byte, clientExpirationYears, daysInYear int) ([]byte, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(script))
 	var modifiedScript bytes.Buffer
 
-	// 计算客户端/服务器证书的过期天数
 	calculatedCertExpirationDays := clientExpirationYears * daysInYear
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		modifiedScript.WriteString(line + "\n")
 
-		// 在create_env_file函数的末尾添加客户端证书有效期环境变量
 		if strings.HasPrefix(line, "create_env_file() {") {
 			for scanner.Scan() {
-				line = scanner.Text()
+				line := scanner.Text()
 				if line == "}" {
-					// 确保这里写入的是计算后的天数
 					modifiedScript.WriteString(fmt.Sprintf("    echo 'CATTLE_NEW_SIGNED_CERT_EXPIRATION_DAYS=%d' | $SUDO tee -a ${FILE_K3S_ENV} >/dev/null\n", calculatedCertExpirationDays))
 					modifiedScript.WriteString(line + "\n")
 					break
@@ -439,13 +428,12 @@ func (i *Installer) addCertificateConfig(script []byte, clientExpirationYears, d
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("扫描脚本添加证书配置时出错: %w", err)
+		return nil, fmt.Errorf("error scanning script for certificate config: %w", err)
 	}
 
 	return modifiedScript.Bytes(), nil
 }
 
-// 可选：提供更灵活的接口
 func (i *Installer) modifyScriptSelective(script []byte, options ModifyOptions) ([]byte, error) {
 	result := script
 	var err error
@@ -453,14 +441,14 @@ func (i *Installer) modifyScriptSelective(script []byte, options ModifyOptions) 
 	if options.EnableRegistry {
 		result, err = i.addRegistrySetup(result)
 		if err != nil {
-			return nil, fmt.Errorf("添加注册表设置失败: %w", err)
+			return nil, fmt.Errorf("failed to add registry setup: %w", err)
 		}
 	}
 
 	if options.EnableCertConfig {
 		result, err = i.addCertificateConfig(result, options.ClientExpirationYears, options.DaysInYear)
 		if err != nil {
-			return nil, fmt.Errorf("添加证书配置失败: %w", err)
+			return nil, fmt.Errorf("failed to add certificate config: %w", err)
 		}
 	}
 
@@ -468,23 +456,33 @@ func (i *Installer) modifyScriptSelective(script []byte, options ModifyOptions) 
 }
 
 func (i *Installer) verifyMasterInstallation(client *ssh.Client) error {
-	// 等待K3s完全启动
 	i.logger.Info("等待K3s服务启动...")
-	time.Sleep(30 * time.Second)
-
-	// 检查K3s服务状态
-	result, err := client.ExecuteCommand("systemctl is-active k3s")
-	if err != nil || !strings.Contains(result.Stdout, "active") {
-		return fmt.Errorf("K3s服务未正常运行: %s", result.Stderr)
+	// 增加重试机制，最多等待3分钟
+	for attempt := 0; attempt < 18; attempt++ {
+		result, err := client.ExecuteCommand("systemctl is-active k3s")
+		if err == nil && strings.Contains(result.Stdout, "active") {
+			i.logger.Info("K3s服务已启动")
+			break
+		}
+		i.logger.Warnf("K3s服务未就绪（尝试 %d/%d）: %v, Stdout: %s, Stderr: %s", attempt+1, 18, err, result.Stdout, result.Stderr)
+		time.Sleep(10 * time.Second)
 	}
 
-	// 检查kubectl可用性
+	result, err := client.ExecuteCommand("systemctl is-active k3s")
+	if err != nil || !strings.Contains(result.Stdout, "active") {
+		// 获取更多服务状态信息
+		logResult, logErr := client.ExecuteCommand("journalctl -u k3s.service -n 50")
+		if logErr == nil {
+			i.logger.Errorf("K3s服务日志: %s", logResult.Stdout)
+		}
+		return fmt.Errorf("K3s服务未正常运行: %v, Stderr: %s", err, result.Stderr)
+	}
+
 	result, err = client.ExecuteCommand("kubectl get nodes")
 	if err != nil {
 		return fmt.Errorf("kubectl命令执行失败: %v", err)
 	}
 
-	// 检查Master节点是否Ready
 	if !strings.Contains(result.Stdout, "Ready") {
 		return fmt.Errorf("Master节点状态异常: %s", result.Stdout)
 	}

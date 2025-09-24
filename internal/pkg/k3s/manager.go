@@ -47,7 +47,7 @@ func (m *Manager) ApplyNodeLabels(client *ssh.Client, labels map[string][]string
 				m.logger.Errorf("应用标签失败 %s: %v", label, err)
 				return fmt.Errorf("为节点 %s 应用标签 %s 失败: %v", nodeName, label, err)
 			}
-			m.logger.Infof("成功应用标签: %s -> %s", nodeName, label)
+			m.logger.Infof("成功应用标签: %s -> %s, 输出: %s", nodeName, label, result.Stdout)
 		}
 	}
 
