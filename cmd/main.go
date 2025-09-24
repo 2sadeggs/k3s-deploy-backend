@@ -41,7 +41,6 @@ func main() {
 	// 注册API
 	r.POST("/api/ssh/test", handlers.SSHTestHandler)
 	r.POST("/api/ssh/test-batch", handlers.SSHBatchTestHandler)
-	r.GET("/api/webssh/ws", handlers.WebSSHHandler)
 	r.POST("/api/k3s/deploy", handlers.K3sDeployHandler)
 	r.GET("/api/k3s/progress/:taskId", handlers.K3sProgressHandler)
 

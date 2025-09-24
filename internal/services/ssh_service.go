@@ -81,15 +81,3 @@ func (s *SSHService) ExecuteCommand(client *ssh.Client, cmd string) (string, err
 	}
 	return strings.TrimSpace(string(output)), nil
 }
-
-func (s *SSHService) CreateInteractiveSession(client *ssh.Client) (*ssh.Session, error) {
-	session, err := client.NewSession()
-	if err != nil {
-		return nil, err
-	}
-	if err := session.RequestPty("xterm", 80, 24, ssh.TerminalModes{}); err != nil {
-		session.Close()
-		return nil, err
-	}
-	return session, nil
-}

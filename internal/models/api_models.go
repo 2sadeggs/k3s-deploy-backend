@@ -29,11 +29,11 @@ type SSHTestResponse struct {
 }
 
 type BatchSSHTestResponseItem struct {
-	ID      int    `json:"id"`
-	Success bool   `json:"success"`
-	Message string `json:"message,omitempty"`
+	ID      int      `json:"id"`
+	Success bool     `json:"success"`
+	Message string   `json:"message,omitempty"`
+	Details []string `json:"details,omitempty"` // 新增这一行
 }
-
 type DeployRequest struct {
 	DeployMode     string                 `json:"deployMode"`
 	Nodes          []SSHTestRequestWithID `json:"nodes"`

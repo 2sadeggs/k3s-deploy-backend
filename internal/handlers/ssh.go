@@ -73,10 +73,11 @@ func SSHBatchTestHandler(c *gin.Context) {
 		wg.Add(1)
 		go func(idx int, node models.SSHTestRequestWithID) {
 			defer wg.Done()
-			success, _, err := sshService.TestConnection(&node)
+			success, details, err := sshService.TestConnection(&node)
 			results[idx] = models.BatchSSHTestResponseItem{
 				ID:      node.ID,
 				Success: success,
+				Details: details, // 新增赋值 details
 			}
 			if err != nil {
 				results[idx].Message = err.Error()
