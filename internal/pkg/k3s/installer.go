@@ -19,8 +19,6 @@ const (
 	officialCNInstallURL     = "https://rancher-mirror.rancher.cn/k3s/k3s-install.sh"
 	defaultSystemRegistryURL = "registry.cn-hangzhou.aliyuncs.com"
 	additionalRegistryURLs   = "https://registry.cn-hangzhou.aliyuncs.com,https://mirror.ccs.tencentyun.com"
-	clientExpirationYears    = 10
-	daysInYear               = 365
 )
 
 type Installer struct {
@@ -241,15 +239,26 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		return fmt.Errorf("上传安装脚本失败: %v", err)
 	}
 
-	// 添加执行权限
-	i.logger.Info("Step 4: 设置脚本执行权限")
-	if _, err := client.ExecuteCommand(fmt.Sprintf("chmod +x %s", scriptPath)); err != nil {
-		return fmt.Errorf("设置脚本执行权限失败: %v", err)
+	isAgentMode := false
+	for _, env := range envArgs {
+		if strings.Contains(env, "K3S_URL=") {
+			isAgentMode = true
+			break
+		}
+	}
+	if !isAgentMode {
+		i.logger.Info("Step 4: 生成自定义CA证书")
+		if err := i.generateCustomCACerts(client); err != nil {
+			i.logger.Warnf("生成自定义CA证书失败: %v", err)
+		}
+	} else {
+		i.logger.Info("Step 4: 跳过自定义CA证书生成（Agent 模式）")
 	}
 
-	i.logger.Info("Step 5: 生成自定义CA证书")
-	if err := i.generateCustomCACerts(client); err != nil {
-		i.logger.Warnf("生成自定义CA证书失败: %v", err)
+	// 添加执行权限
+	i.logger.Info("Step 5: 设置脚本执行权限")
+	if _, err := client.ExecuteCommand(fmt.Sprintf("chmod +x %s", scriptPath)); err != nil {
+		return fmt.Errorf("设置脚本执行权限失败: %v", err)
 	}
 
 	i.logger.Info("Step 6: 准备环境变量和参数")
@@ -309,9 +318,9 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 	envStr := strings.Join(finalEnvArgs, " ")
 	var cmd string
 	if len(finalCmdArgs) > 0 {
-		cmd = fmt.Sprintf("cd /tmp && %s bash -x %s %s > %s 2>&1", envStr, scriptPath, strings.Join(finalCmdArgs, " "), logPath)
+		cmd = fmt.Sprintf("cd /tmp && %s bash  %s %s > %s 2>&1", envStr, scriptPath, strings.Join(finalCmdArgs, " "), logPath)
 	} else {
-		cmd = fmt.Sprintf("cd /tmp && %s bash -x %s > %s 2>&1", envStr, scriptPath, logPath)
+		cmd = fmt.Sprintf("cd /tmp && %s bash  %s > %s 2>&1", envStr, scriptPath, logPath)
 	}
 
 	i.logger.Infof("执行命令: %s", cmd)
@@ -405,11 +414,6 @@ func (i *Installer) checkAlternativeOSDetection(client *ssh.Client) (bool, strin
 	}
 
 	return false, "", nil
-}
-
-func (i *Installer) generateCustomCACerts(client *ssh.Client) error {
-	i.logger.Info("自定义CA证书生成已跳过（可在需要时实现）")
-	return nil
 }
 
 func (i *Installer) addRegistrySetup(script []byte) ([]byte, error) {
