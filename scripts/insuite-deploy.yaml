@@ -1,0 +1,361 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: insuite
+  labels:
+    name: insuite
+---
+# 数据库配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: insuite-database-config
+  namespace: insuite
+data:
+  POSTGRES_DB: "insuite"
+  POSTGRES_USER: "insuite"
+  POSTGRES_PASSWORD: "insuite123"
+---
+# 数据库存储
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: insuite-database-pvc
+  namespace: insuite
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+# 数据库部署
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: insuite-database
+  namespace: insuite
+  labels:
+    app: insuite-database
+    tier: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: insuite-database
+  template:
+    metadata:
+      labels:
+        app: insuite-database
+        tier: database
+    spec:
+      nodeSelector:
+        insuite.database: "true"
+      containers:
+        - name: postgres
+          image: postgres:13
+          ports:
+            - containerPort: 5432
+              name: postgres
+          envFrom:
+            - configMapRef:
+                name: insuite-database-config
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+              subPath: postgres
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - insuite
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - insuite
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: insuite-database-pvc
+---
+# 数据库服务
+apiVersion: v1
+kind: Service
+metadata:
+  name: insuite-database
+  namespace: insuite
+  labels:
+    app: insuite-database
+spec:
+  selector:
+    app: insuite-database
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  type: ClusterIP
+---
+# 中间件部署 (Redis)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: insuite-middleware
+  namespace: insuite
+  labels:
+    app: insuite-middleware
+    tier: middleware
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: insuite-middleware
+  template:
+    metadata:
+      labels:
+        app: insuite-middleware
+        tier: middleware
+    spec:
+      nodeSelector:
+        insuite.middleware: "true"
+      containers:
+        - name: redis
+          image: redis:6-alpine
+          ports:
+            - containerPort: 6379
+              name: redis
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+# 中间件服务
+apiVersion: v1
+kind: Service
+metadata:
+  name: insuite-middleware
+  namespace: insuite
+  labels:
+    app: insuite-middleware
+spec:
+  selector:
+    app: insuite-middleware
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
+  type: ClusterIP
+---
+# 应用配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: insuite-app-config
+  namespace: insuite
+data:
+  DATABASE_URL: "postgres://insuite:insuite123@insuite-database:5432/insuite"
+  REDIS_URL: "redis://insuite-middleware:6379"
+  APP_ENV: "production"
+---
+# 应用部署
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: insuite-app
+  namespace: insuite
+  labels:
+    app: insuite-app
+    tier: application
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: insuite-app
+  template:
+    metadata:
+      labels:
+        app: insuite-app
+        tier: application
+    spec:
+      nodeSelector:
+        insuite.app: "true"
+      containers:
+        - name: app
+          image: nginx:1.21-alpine
+          ports:
+            - containerPort: 80
+              name: http
+          envFrom:
+            - configMapRef:
+                name: insuite-app-config
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+---
+# Nginx配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: insuite
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+    
+        location / {
+            return 200 '
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>inSuite Application</title>
+                <style>
+                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                    .container { max-width: 600px; margin: 0 auto; }
+                    .status { padding: 20px; margin: 20px 0; border-radius: 5px; }
+                    .success { background-color: #d4edda; color: #155724; }
+                    .info { background-color: #d1ecf1; color: #0c5460; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🎉 inSuite Application</h1>
+                    <div class="status success">
+                        <h3>部署成功！</h3>
+                        <p>inSuite应用已成功部署到K3s集群中</p>
+                    </div>
+                    <div class="status info">
+                        <h4>系统信息</h4>
+                        <p>主机名: $hostname</p>
+                        <p>Pod IP: $server_addr</p>
+                        <p>时间: $time_local</p>
+                    </div>
+                    <div class="status info">
+                        <h4>服务组件</h4>
+                        <ul style="text-align: left;">
+                            <li>✅ 应用服务 (Nginx)</li>
+                            <li>✅ 中间件服务 (Redis)</li>
+                            <li>✅ 数据库服务 (PostgreSQL)</li>
+                        </ul>
+                    </div>
+                </div>
+            </body>
+            </html>
+            ';
+            add_header Content-Type text/html;
+        }
+    
+        location /health {
+            return 200 '{"status":"ok","timestamp":"$time_iso8601"}';
+            add_header Content-Type application/json;
+        }
+    
+        location /api/status {
+            return 200 '{"database":"connected","redis":"connected","status":"healthy"}';
+            add_header Content-Type application/json;
+        }
+    }
+---
+# 应用服务
+apiVersion: v1
+kind: Service
+metadata:
+  name: insuite-app
+  namespace: insuite
+  labels:
+    app: insuite-app
+spec:
+  selector:
+    app: insuite-app
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http
+      nodePort: 30080
+  type: NodePort
+---
+# Ingress (可选)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: insuite-ingress
+  namespace: insuite
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+    - host: insuite.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: insuite-app
+                port:
+                  number: 80
+---
+# 服务监控 (可选)
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: insuite-monitor
+  namespace: insuite
+spec:
+  selector:
+    matchLabels:
+      app: insuite-app
+  endpoints:
+    - port: http
+      interval: 30s
+      path: /health
