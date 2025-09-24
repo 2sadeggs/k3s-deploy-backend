@@ -127,7 +127,7 @@ spec:
         insuite.database: "true"
       containers:
       - name: database
-        image: postgres:13
+        image: m.daocloud.io/docker.io/library/postgres:13
         env:
         - name: POSTGRES_DB
           value: "insuite"
@@ -180,7 +180,7 @@ spec:
         insuite.middleware: "true"
       containers:
       - name: middleware
-        image: redis:6
+        image: m.daocloud.io/docker.io/library/redis:6
         ports:
         - containerPort: 6379
 ---
@@ -226,7 +226,7 @@ spec:
         insuite.app: "true"
       containers:
       - name: app
-        image: nginx:latest
+        image: m.daocloud.io/docker.io/library/nginx:latest
         ports:
         - containerPort: 80
         env:

@@ -96,6 +96,11 @@ func (i *Installer) InstallAgent(client *ssh.Client, masterClient *ssh.Client, n
 		return fmt.Errorf("K3s Agent安装失败: %v", err)
 	}
 
+	// 验证 Agent 安装
+	if err := i.verifyAgentInstallation(client); err != nil {
+		return fmt.Errorf("验证Agent安装失败: %v", err)
+	}
+
 	i.logger.Infof("节点 %s K3s Agent安装成功", nodeName)
 	return nil
 }
@@ -265,6 +270,7 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		i.logger.Info("已添加SELinux绕过配置")
 	}
 
+	// 如果是国内源自动添加参数，但仅在非 Agent 模式（无 K3S_URL）下添加 --system-default-registry 等参数
 	if installURL == officialCNInstallURL {
 		i.logger.Info("--- 国内镜像配置 ---")
 
@@ -274,35 +280,65 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		}
 		finalEnvArgs = append(finalEnvArgs, additionalEnvs...)
 
-		additionalArgs := []string{
-			fmt.Sprintf("--system-default-registry=%s", defaultSystemRegistryURL),
-			"--disable-default-registry-endpoint",
+		// 检查是否为 Agent 模式（存在 K3S_URL 环境变量）
+		isAgentMode := false
+		for _, env := range finalEnvArgs {
+			if strings.Contains(env, "K3S_URL=") {
+				isAgentMode = true
+				break
+			}
+		}
+
+		additionalArgs := []string{}
+		if !isAgentMode {
+			additionalArgs = []string{
+				fmt.Sprintf("--system-default-registry=%s", defaultSystemRegistryURL),
+				"--disable-default-registry-endpoint",
+			}
+			i.logger.Info("已添加国内镜像命令参数（仅 Server 模式）")
+		} else {
+			i.logger.Info("跳过国内镜像命令参数（Agent 模式）")
 		}
 		finalCmdArgs = append(finalCmdArgs, additionalArgs...)
-		i.logger.Info("已添加国内镜像配置")
 	}
 
 	i.logger.Info("Step 7: 开始执行安装")
 
 	// 构建命令，使用 bash -x 调试
+	logPath := "/tmp/k3s-install.log"
 	envStr := strings.Join(finalEnvArgs, " ")
 	var cmd string
 	if len(finalCmdArgs) > 0 {
-		cmd = fmt.Sprintf("cd /tmp && %s bash -x %s %s", envStr, scriptPath, strings.Join(finalCmdArgs, " "))
+		cmd = fmt.Sprintf("cd /tmp && %s bash -x %s %s > %s 2>&1", envStr, scriptPath, strings.Join(finalCmdArgs, " "), logPath)
 	} else {
-		cmd = fmt.Sprintf("cd /tmp && %s bash -x %s", envStr, scriptPath)
+		cmd = fmt.Sprintf("cd /tmp && %s bash -x %s > %s 2>&1", envStr, scriptPath, logPath)
 	}
 
 	i.logger.Infof("执行命令: %s", cmd)
 
 	result, err := client.ExecuteCommand(cmd)
 	if err != nil {
+		// 读取日志文件
+		logResult, logErr := client.ExecuteCommand(fmt.Sprintf("cat %s", logPath))
+		if logErr == nil {
+			i.logger.Errorf("安装脚本输出: %s", logResult.Stdout)
+		} else {
+			i.logger.Errorf("无法读取安装日志: %v", logErr)
+		}
 		i.logger.Errorf("K3s安装失败: %v", err)
 		if result != nil {
 			i.logger.Errorf("标准输出: %s", result.Stdout)
 			i.logger.Errorf("错误输出: %s", result.Stderr)
 		}
 		return fmt.Errorf("K3s安装失败: %v", err)
+	}
+
+	// 读取日志文件以记录安装输出
+	logResult, err := client.ExecuteCommand(fmt.Sprintf("cat %s", logPath))
+	if err == nil {
+		i.logger.Infof("安装脚本输出: %s", logResult.Stdout)
+	} else {
+		i.logger.Warnf("无法读取安装日志: %v", err)
 	}
 
 	i.logger.Info("K3s安装完成!")
@@ -386,7 +422,7 @@ func (i *Installer) addRegistrySetup(script []byte) ([]byte, error) {
 
 		if strings.HasPrefix(line, "setup_env() {") {
 			for scanner.Scan() {
-				line = scanner.Text()
+				line := scanner.Text()
 				if line == "}" {
 					modifiedScript.WriteString("    setup_registry\n")
 					modifiedScript.WriteString(line + "\n")
@@ -485,6 +521,32 @@ func (i *Installer) verifyMasterInstallation(client *ssh.Client) error {
 
 	if !strings.Contains(result.Stdout, "Ready") {
 		return fmt.Errorf("Master节点状态异常: %s", result.Stdout)
+	}
+
+	return nil
+}
+
+func (i *Installer) verifyAgentInstallation(client *ssh.Client) error {
+	i.logger.Info("等待K3s Agent服务启动...")
+	// 增加重试机制，最多等待3分钟
+	for attempt := 0; attempt < 18; attempt++ {
+		result, err := client.ExecuteCommand("systemctl is-active k3s-agent")
+		if err == nil && strings.Contains(result.Stdout, "active") {
+			i.logger.Info("K3s Agent服务已启动")
+			break
+		}
+		i.logger.Warnf("K3s Agent服务未就绪（尝试 %d/%d）: %v, Stdout: %s, Stderr: %s", attempt+1, 18, err, result.Stdout, result.Stderr)
+		time.Sleep(10 * time.Second)
+	}
+
+	result, err := client.ExecuteCommand("systemctl is-active k3s-agent")
+	if err != nil || !strings.Contains(result.Stdout, "active") {
+		// 获取更多服务状态信息
+		logResult, logErr := client.ExecuteCommand("journalctl -u k3s-agent.service -n 50")
+		if logErr == nil {
+			i.logger.Errorf("K3s Agent服务日志: %s", logResult.Stdout)
+		}
+		return fmt.Errorf("K3s Agent服务未正常运行: %v, Stderr: %s", err, result.Stderr)
 	}
 
 	return nil
