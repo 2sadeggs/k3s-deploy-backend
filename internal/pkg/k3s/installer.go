@@ -26,7 +26,7 @@ const (
 	officialCNInstallURL     = "https://rancher-mirror.rancher.cn/k3s/k3s-install.sh"
 	defaultSystemRegistryURL = "registry.cn-hangzhou.aliyuncs.com"
 	additionalRegistryURLs   = "https://registry.cn-hangzhou.aliyuncs.com,https://mirror.ccs.tencentyun.com"
-	caExpirationYears        = 1000 // CA 证书有效期 10 年
+	caExpirationYears        = 1000 // CA 证书有效期 100 年
 	clientExpirationYears    = 100  // 客户端证书有效期 10 年
 	daysInYear               = 365  // 每年近似天数，用于证书有效期计算
 	keyBits                  = 2048
@@ -181,19 +181,33 @@ func (i *Installer) getInstallURL(client *ssh.Client) (string, error) {
 }
 
 func (i *Installer) isInMainlandChina(client *ssh.Client) (bool, error) {
-	if reachable, _ := i.isInternetReachable(client, "http://www.baidu.com"); !reachable {
+	if reachable, _ := i.isInternetReachable(client, "www.baidu.com"); !reachable {
+		i.logger.Info("无法 ping 百度，假设在中国大陆")
 		return true, nil
 	}
-	if reachable, _ := i.isInternetReachable(client, "http://www.google.com"); !reachable {
+	if reachable, _ := i.isInternetReachable(client, "www.google.com"); !reachable {
+		i.logger.Info("无法 ping Google，假设在中国大陆")
 		return true, nil
 	}
+	i.logger.Info("可以 ping Google，假设不在中国大陆")
 	return false, nil
 }
 
-func (i *Installer) isInternetReachable(client *ssh.Client, url string) (bool, error) {
-	cmd := fmt.Sprintf("curl -s --connect-timeout 3 --max-time 5 %s > /dev/null 2>&1", url)
+func (i *Installer) isInternetReachable(client *ssh.Client, host string) (bool, error) {
+	// 先检查 ping 命令是否存在
+	if _, err := client.ExecuteCommand("which ping"); err != nil {
+		i.logger.Warnf("目标节点未安装 ping 命令: %v", err)
+		return false, fmt.Errorf("ping 命令不可用")
+	}
+
+	// 使用 ping 命令测试连通性，-c 3 表示 ping 3 次，-W 2 表示每次 ping 超时 2 秒
+	cmd := fmt.Sprintf("ping -c 3 -W 2 %s > /dev/null 2>&1", host)
 	result, err := client.ExecuteCommand(cmd)
-	return err == nil && result.ExitCode == 0, err
+	if err != nil {
+		i.logger.Warnf("无法 ping %s: %v", host, err)
+		return false, err
+	}
+	return result.ExitCode == 0, nil
 }
 
 func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArgs, cmdArgs []string) error {
