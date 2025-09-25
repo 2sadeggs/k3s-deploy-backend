@@ -131,27 +131,33 @@ func (i *Installer) InstallAgent(client *ssh.Client, masterClient *ssh.Client, n
 }
 
 func (i *Installer) getInternalIP(client *ssh.Client) (string, error) {
-	cmd := `bash -c "echo '' | nc -u -w 2 8.8.8.8 80 && ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | head -n 1"`
-	result, err := client.ExecuteCommand(cmd)
-	if err != nil {
-		// 备选命令，防止 nc 不可用
-		cmd = `ip route get 8.8.8.8 | grep -oP 'src \K\d+(\.\d+){3}' | head -n 1`
-		result, err = client.ExecuteCommand(cmd)
+	// 按优先级尝试几种常用方法
+	commands := []string{
+		// 方法1: ip route - 最可靠，几乎所有现代Linux都有
+		`ip route get 1.1.1.1 | grep -o 'src [0-9.]*' | cut -d' ' -f2`,
+
+		// 方法2: hostname - 备选方案
+		`hostname -I | awk '{print $1}'`,
+
+		// 方法3: 直接查看网卡 - 最后备选
+		`ip addr | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d'/' -f1`,
+	}
+
+	for _, cmd := range commands {
+		result, err := client.ExecuteCommand(cmd)
 		if err != nil {
-			return "", fmt.Errorf("执行IP获取命令失败: %v", err)
+			continue // 失败就试下一个
+		}
+
+		ip := strings.TrimSpace(result.Stdout)
+
+		// 简单验证：不为空且能解析为IP
+		if ip != "" && net.ParseIP(ip) != nil && !strings.HasPrefix(ip, "127.") {
+			return ip, nil
 		}
 	}
 
-	ip := strings.TrimSpace(result.Stdout)
-	if ip == "" {
-		return "", fmt.Errorf("无法获取节点的内部IP")
-	}
-
-	if net.ParseIP(ip) == nil {
-		return "", fmt.Errorf("获取的IP地址格式无效: %s", ip)
-	}
-
-	return ip, nil
+	return "", fmt.Errorf("无法获取内网IP地址")
 }
 
 func (i *Installer) autoInstallK3sByLocation(client *ssh.Client, envArgs, cmdArgs []string) error {
