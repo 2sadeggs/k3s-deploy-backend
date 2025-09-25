@@ -119,6 +119,70 @@ func (c *Client) ExecuteCommand(cmd string) (*CommandResult, error) {
 	return result, nil
 }
 
+func (c *Client) ExecuteCommandWithStdin(script []byte, cmd string, env []string) (*CommandResult, error) {
+	if c.conn == nil {
+		return nil, fmt.Errorf("SSH连接未建立")
+	}
+
+	session, err := c.conn.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("创建SSH会话失败: %v", err)
+	}
+	defer session.Close()
+
+	// 设置环境变量
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			if err := session.Setenv(parts[0], parts[1]); err != nil {
+				return nil, fmt.Errorf("设置环境变量 %s 失败: %v", e, err)
+			}
+		}
+	}
+
+	// 创建 stdin pipe
+	w, err := session.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建stdin pipe失败: %v", err)
+	}
+
+	// 设置 stdout 和 stderr
+	var stdoutBuf, stderrBuf strings.Builder
+	session.Stdout = &stdoutBuf
+	session.Stderr = &stderrBuf
+
+	// 启动命令
+	if err := session.Start(cmd); err != nil {
+		return nil, fmt.Errorf("启动命令 %s 失败: %v", cmd, err)
+	}
+
+	// 写入脚本内容到 stdin
+	_, err = w.Write(script)
+	if err != nil {
+		return nil, fmt.Errorf("写入stdin失败: %v", err)
+	}
+	w.Close()
+
+	// 等待命令完成
+	err = session.Wait()
+	result := &CommandResult{
+		Stdout: strings.TrimSpace(stdoutBuf.String()),
+		Stderr: strings.TrimSpace(stderrBuf.String()),
+	}
+
+	if err != nil {
+		if exitError, ok := err.(*ssh.ExitError); ok {
+			result.ExitCode = exitError.ExitStatus()
+		} else {
+			result.ExitCode = 1
+		}
+		return result, fmt.Errorf("命令执行失败: %v", err)
+	}
+
+	result.ExitCode = 0
+	return result, nil
+}
+
 func (c *Client) UploadFile(content, remotePath string) error {
 	if c.conn == nil {
 		return fmt.Errorf("SSH连接未建立")

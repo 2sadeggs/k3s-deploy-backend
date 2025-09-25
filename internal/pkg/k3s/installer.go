@@ -166,6 +166,7 @@ func (i *Installer) isInternetReachable(client *ssh.Client, url string) (bool, e
 func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArgs, cmdArgs []string) error {
 	i.logger.Infof("=== K3s 安装调试信息 ===")
 	i.logger.Infof("安装URL: %s", installURL)
+	i.logger.Warnf("脚本在后端下载，确保 %s 适合目标节点网络环境", installURL)
 	i.logger.Infof("环境变量数量: %d", len(envArgs))
 	i.logger.Infof("命令参数数量: %d", len(cmdArgs))
 
@@ -232,11 +233,24 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 
 	i.logger.Infof("脚本修改完成，最终大小: %d bytes", len(modifiedScript))
 
-	scriptPath := "/tmp/k3s-install-modified.sh"
-	i.logger.Infof("Step 3: 保存修改后的脚本到 %s", scriptPath)
-
-	if err := client.UploadFile(string(modifiedScript), scriptPath); err != nil {
-		return fmt.Errorf("上传安装脚本失败: %v", err)
+	// 脚本预览
+	scriptLines := strings.Split(string(modifiedScript), "\n")
+	i.logger.Info("脚本预览（前3行）：")
+	for idx := 0; idx < 3 && idx < len(scriptLines); idx++ {
+		i.logger.Infof("  %d: %s", idx+1, scriptLines[idx])
+	}
+	if len(scriptLines) > 6 {
+		i.logger.Infof("  ... (%d 行省略) ...", len(scriptLines)-6)
+	}
+	i.logger.Info("脚本预览（后3行）：")
+	start := len(scriptLines) - 3
+	if start < 3 {
+		start = 3
+	}
+	for idx := start; idx < len(scriptLines); idx++ {
+		if idx >= 0 && scriptLines[idx] != "" {
+			i.logger.Infof("  %d: %s", idx+1, scriptLines[idx])
+		}
 	}
 
 	isAgentMode := false
@@ -247,21 +261,15 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		}
 	}
 	if !isAgentMode {
-		i.logger.Info("Step 4: 生成自定义CA证书")
+		i.logger.Info("Step 3: 生成自定义CA证书")
 		if err := i.generateCustomCACerts(client); err != nil {
 			i.logger.Warnf("生成自定义CA证书失败: %v", err)
 		}
 	} else {
-		i.logger.Info("Step 4: 跳过自定义CA证书生成（Agent 模式）")
+		i.logger.Info("Step 3: 跳过自定义CA证书生成（Agent 模式）")
 	}
 
-	// 添加执行权限
-	i.logger.Info("Step 5: 设置脚本执行权限")
-	if _, err := client.ExecuteCommand(fmt.Sprintf("chmod +x %s", scriptPath)); err != nil {
-		return fmt.Errorf("设置脚本执行权限失败: %v", err)
-	}
-
-	i.logger.Info("Step 6: 准备环境变量和参数")
+	i.logger.Info("Step 4: 准备环境变量和参数")
 	finalEnvArgs := make([]string, len(envArgs))
 	copy(finalEnvArgs, envArgs)
 	finalCmdArgs := make([]string, len(cmdArgs))
@@ -279,7 +287,6 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		i.logger.Info("已添加SELinux绕过配置")
 	}
 
-	// 如果是国内源自动添加参数，但仅在非 Agent 模式（无 K3S_URL）下添加 --system-default-registry 等参数
 	if installURL == officialCNInstallURL {
 		i.logger.Info("--- 国内镜像配置 ---")
 
@@ -289,7 +296,6 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		}
 		finalEnvArgs = append(finalEnvArgs, additionalEnvs...)
 
-		// 检查是否为 Agent 模式（存在 K3S_URL 环境变量）
 		isAgentMode := false
 		for _, env := range finalEnvArgs {
 			if strings.Contains(env, "K3S_URL=") {
@@ -311,46 +317,71 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 		finalCmdArgs = append(finalCmdArgs, additionalArgs...)
 	}
 
-	i.logger.Info("Step 7: 开始执行安装")
-
-	// 构建命令，使用 bash -x 调试
-	logPath := "/tmp/k3s-install.log"
-	envStr := strings.Join(finalEnvArgs, " ")
-	var cmd string
-	if len(finalCmdArgs) > 0 {
-		cmd = fmt.Sprintf("cd /tmp && %s bash  %s %s > %s 2>&1", envStr, scriptPath, strings.Join(finalCmdArgs, " "), logPath)
-	} else {
-		cmd = fmt.Sprintf("cd /tmp && %s bash  %s > %s 2>&1", envStr, scriptPath, logPath)
+	i.logger.Infof("最终环境变量: %d 总计", len(finalEnvArgs))
+	for idx, env := range finalEnvArgs {
+		if strings.Contains(strings.ToUpper(env), "TOKEN") || strings.Contains(strings.ToUpper(env), "PASSWORD") {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) == 2 {
+				i.logger.Infof("  [%d] %s=***HIDDEN***", idx, parts[0])
+			} else {
+				i.logger.Infof("  [%d] %s", idx, env)
+			}
+		} else {
+			i.logger.Infof("  [%d] %s", idx, env)
+		}
 	}
 
-	i.logger.Infof("执行命令: %s", cmd)
+	i.logger.Infof("最终命令参数: %d 总计", len(finalCmdArgs))
+	for idx, arg := range finalCmdArgs {
+		i.logger.Infof("  [%d] %s", idx, arg)
+	}
 
-	result, err := client.ExecuteCommand(cmd)
-	if err != nil {
-		// 读取日志文件
-		logResult, logErr := client.ExecuteCommand(fmt.Sprintf("cat %s", logPath))
-		if logErr == nil {
-			i.logger.Errorf("安装脚本输出: %s", logResult.Stdout)
-		} else {
-			i.logger.Errorf("无法读取安装日志: %v", logErr)
+	i.logger.Info("Step 5: 构建Shell命令")
+	shellArgs := []string{"-s"}
+	if len(finalCmdArgs) > 0 {
+		shellArgs = append(shellArgs, "--")
+		shellArgs = append(shellArgs, finalCmdArgs...)
+	}
+
+	cmd := "/bin/sh " + strings.Join(shellArgs, " ")
+	i.logger.Infof("Shell命令: %s", cmd)
+	i.logger.Info("Shell参数分解：")
+	for idx, arg := range shellArgs {
+		switch arg {
+		case "-s":
+			i.logger.Infof("  [%d] %s  (从stdin读取脚本)", idx, arg)
+		case "--":
+			i.logger.Infof("  [%d] %s  (分隔符：后续参数传递给脚本)", idx, arg)
+		default:
+			i.logger.Infof("  [%d] %s  (作为$%d传递给脚本)", idx, arg, idx-1)
 		}
+	}
+
+	i.logger.Info("Step 6: 开始执行安装")
+	i.logger.Infof("等效官方安装命令：")
+	if len(finalCmdArgs) > 0 {
+		i.logger.Infof("  curl -sfL %s | %s sh -s - %s", installURL, strings.Join(finalEnvArgs, " "), strings.Join(finalCmdArgs, " "))
+	} else {
+		i.logger.Infof("  curl -sfL %s | %s sh", installURL, strings.Join(finalEnvArgs, " "))
+	}
+
+	result, err := client.ExecuteCommandWithStdin(modifiedScript, cmd, finalEnvArgs)
+	if err != nil {
 		i.logger.Errorf("K3s安装失败: %v", err)
-		if result != nil {
-			i.logger.Errorf("标准输出: %s", result.Stdout)
-			i.logger.Errorf("错误输出: %s", result.Stderr)
+		i.logger.Errorf("标准输出: %s", result.Stdout)
+		i.logger.Errorf("错误输出: %s", result.Stderr)
+		if isDomestic {
+			i.logger.Info("💡 注意：已为国产操作系统启用SELinux绕过 (%s)", osName)
+			i.logger.Info("💡 如果问题持续，问题可能与SELinux无关")
 		}
 		return fmt.Errorf("K3s安装失败: %v", err)
 	}
 
-	// 读取日志文件以记录安装输出
-	logResult, err := client.ExecuteCommand(fmt.Sprintf("cat %s", logPath))
-	if err == nil {
-		i.logger.Infof("安装脚本输出: %s", logResult.Stdout)
-	} else {
-		i.logger.Warnf("无法读取安装日志: %v", err)
-	}
-
+	i.logger.Infof("安装脚本输出: %s", result.Stdout)
 	i.logger.Info("K3s安装完成!")
+	if isDomestic {
+		i.logger.Infof("国产操作系统 (%s) 兼容模式已使用", osName)
+	}
 	return nil
 }
 
