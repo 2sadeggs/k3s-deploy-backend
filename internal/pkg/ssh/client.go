@@ -130,16 +130,6 @@ func (c *Client) ExecuteCommandWithStdin(script []byte, cmd string, env []string
 	}
 	defer session.Close()
 
-	// 设置环境变量
-	for _, e := range env {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
-			if err := session.Setenv(parts[0], parts[1]); err != nil {
-				return nil, fmt.Errorf("设置环境变量 %s 失败: %v", e, err)
-			}
-		}
-	}
-
 	// 创建 stdin pipe
 	w, err := session.StdinPipe()
 	if err != nil {
@@ -151,9 +141,18 @@ func (c *Client) ExecuteCommandWithStdin(script []byte, cmd string, env []string
 	session.Stdout = &stdoutBuf
 	session.Stderr = &stderrBuf
 
+	// 添加环境变量到命令前缀
+	var cmdWithEnv string
+	if len(env) > 0 {
+		envStr := strings.Join(env, " ")
+		cmdWithEnv = fmt.Sprintf("%s %s", envStr, cmd)
+	} else {
+		cmdWithEnv = cmd
+	}
+
 	// 启动命令
-	if err := session.Start(cmd); err != nil {
-		return nil, fmt.Errorf("启动命令 %s 失败: %v", cmd, err)
+	if err := session.Start(cmdWithEnv); err != nil {
+		return nil, fmt.Errorf("启动命令 %s 失败: %v", cmdWithEnv, err)
 	}
 
 	// 写入脚本内容到 stdin

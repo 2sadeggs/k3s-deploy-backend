@@ -386,17 +386,16 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 
 	i.logger.Info("Step 6: 开始执行安装")
 	i.logger.Infof("等效官方安装命令：")
-	if len(finalCmdArgs) > 0 {
-		i.logger.Infof("  curl -sfL %s | %s sh -s - %s", installURL, strings.Join(finalEnvArgs, " "), strings.Join(finalCmdArgs, " "))
-	} else {
-		i.logger.Infof("  curl -sfL %s | %s sh", installURL, strings.Join(finalEnvArgs, " "))
-	}
-
+	i.logger.Infof("  curl -sfL %s | %s sh -s - %s", installURL, strings.Join(finalEnvArgs, " "), strings.Join(finalCmdArgs, " "))
 	result, err := client.ExecuteCommandWithStdin(modifiedScript, cmd, finalEnvArgs)
 	if err != nil {
 		i.logger.Errorf("K3s安装失败: %v", err)
-		i.logger.Errorf("标准输出: %s", result.Stdout)
-		i.logger.Errorf("错误输出: %s", result.Stderr)
+		if result != nil {
+			i.logger.Errorf("标准输出: %s", result.Stdout)
+			i.logger.Errorf("错误输出: %s", result.Stderr)
+		} else {
+			i.logger.Errorf("无标准输出或错误输出（result is nil）")
+		}
 		if isDomestic {
 			i.logger.Info("💡 注意：已为国产操作系统启用SELinux绕过 (%s)", osName)
 			i.logger.Info("💡 如果问题持续，问题可能与SELinux无关")
