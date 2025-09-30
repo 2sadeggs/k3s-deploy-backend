@@ -385,10 +385,12 @@ func (i *Installer) executeInstall(client *ssh.Client, installURL string, envArg
 
 	i.logger.Info("Step 5: 构建Shell命令")
 	shellArgs := []string{"-s"}
-	if len(finalCmdArgs) > 0 {
-		shellArgs = append(shellArgs, "--")
-		shellArgs = append(shellArgs, finalCmdArgs...)
-	}
+	shellArgs = append(shellArgs, "--") // "--"是比"-"更健壮的写法
+	shellArgs = append(shellArgs, finalCmdArgs...)
+	//if len(finalCmdArgs) > 0 {
+	//	shellArgs = append(shellArgs, "--")
+	//	shellArgs = append(shellArgs, finalCmdArgs...)
+	//}
 
 	cmd := "/bin/sh " + strings.Join(shellArgs, " ")
 	i.logger.Infof("Shell命令: %s", cmd)
@@ -473,8 +475,8 @@ func (i *Installer) checkAlternativeOSDetection(client *ssh.Client) (bool, strin
 		"/etc/redflag-release":  "红旗Linux",
 	}
 
-	for path, name := range domesticPaths {
-		result, err := client.ExecuteCommand(fmt.Sprintf("test -f %s && echo 'found' || echo 'not_found'", path))
+	for p, name := range domesticPaths {
+		result, err := client.ExecuteCommand(fmt.Sprintf("test -f %s && echo 'found' || echo 'not_found'", p))
 		if err == nil && strings.TrimSpace(result.Stdout) == "found" {
 			return true, name, nil
 		}
